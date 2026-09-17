@@ -3,7 +3,8 @@ name: build-wasm
 on:
   workflow_dispatch:
   push:
-    paths: ["wasm/**", ".github/workflows/build-wasm.yml"]
+    # pas wasm/out : les binaires produits sont versionnés, sans redéclencher le build
+    paths: ["wasm/importer-xcaf.cpp", "wasm/build.sh", ".github/workflows/build-wasm.yml"]
 
 jobs:
   build:
