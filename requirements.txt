@@ -1,0 +1,3 @@
+# Viewer PyQt6 + OpenCASCADE natif (qt/step_viewer_qt.py) et génération du STEP de test
+cadquery-ocp==8.0.1.0.0
+PyQt6>=6.7

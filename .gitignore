@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+vendor/package/
+vendor/*.tgz
+.claude/
+# bibliothèques téléchargées par vendor/fetch_vendor.py (reproductibles)
+vendor/*.js
+vendor/*.wasm
+!vendor/fetch_vendor.py

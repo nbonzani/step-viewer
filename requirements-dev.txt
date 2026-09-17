@@ -1,0 +1,2 @@
+-r requirements.txt
+playwright>=1.45   # tests/html_selftest.py (utilise l'Edge installé, pas de téléchargement de navigateur)
