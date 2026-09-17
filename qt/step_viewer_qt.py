@@ -5,7 +5,8 @@ Capture :    python step_viewer_qt.py fichier.step --dump sortie.png   (rendu ho
 
 Interaction : clic gauche = rotation, clic droit / molette enfoncée = panoramique, molette = zoom au curseur,
               double-clic = ajuster. Raccourcis : F ajuster, E arêtes (toutes/vives/aucune), P perspective/ortho,
-              0 iso, 1 face, 2 arrière, 3 dessus, 4 dessous, 5 gauche, 6 droite, Ctrl+O ouvrir.
+              T arborescence, 0 iso, 1 face, 2 arrière, 3 dessus, 4 dessous, 5 gauche, 6 droite, Ctrl+O ouvrir.
+Arborescence : dock à gauche, une case à cocher par pièce / sous-ensemble (masquage en cascade).
 """
 from __future__ import annotations
 
@@ -18,7 +19,8 @@ from pathlib import Path
 from PyQt6.QtCore import QPoint, Qt, QTimer
 from PyQt6.QtGui import QAction, QKeySequence
 from PyQt6.QtWidgets import (
-    QApplication, QFileDialog, QLabel, QMainWindow, QMessageBox, QStackedLayout, QToolBar, QWidget,
+    QApplication, QDockWidget, QFileDialog, QLabel, QMainWindow, QMenu, QMessageBox, QStackedLayout,
+    QToolBar, QToolButton, QTreeWidget, QTreeWidgetItem, QWidget,
 )
 
 from OCP.AIS import AIS_InteractiveContext, AIS_Shaded
@@ -30,13 +32,12 @@ from OCP.OpenGl import OpenGl_GraphicDriver
 from OCP.Quantity import Quantity_Color, Quantity_NOC_BLACK, Quantity_NOC_WHITE, Quantity_TOC_sRGB
 from OCP.STEPCAFControl import STEPCAFControl_Reader
 from OCP.TCollection import TCollection_ExtendedString
-from OCP.collections import Sequence_TDF_Label
+from OCP.TDataStd import TDataStd_Name
 from OCP.TDocStd import TDocStd_Document
 from OCP.V3d import V3d_AmbientLight, V3d_DirectionalLight, V3d_TypeOfOrientation, V3d_TypeOfVisualization, V3d_Viewer
 from OCP.gp import gp_Dir
 from OCP.WNT import WNT_Window
-from OCP.XCAFDoc import XCAFDoc_DocumentTool
-from OCP.XCAFPrs import XCAFPrs_AISObject
+from OCP.XCAFPrs import XCAFPrs_AISObject, XCAFPrs_DocumentExplorer, XCAFPrs_DocumentExplorerFlags_None
 
 STEP_EXT = (".step", ".stp")
 
@@ -49,6 +50,8 @@ VIEWS = {
     "left": V3d_TypeOfOrientation.V3d_Xneg,
     "right": V3d_TypeOfOrientation.V3d_Xpos,
 }
+VIEW_LABELS = (("0", "Isométrique", "iso"), ("1", "Face", "front"), ("2", "Arrière", "back"), ("3", "Dessus", "top"),
+               ("4", "Dessous", "bottom"), ("5", "Gauche", "left"), ("6", "Droite", "right"))
 EDGE_MODES = ("all", "sharp", "none")
 EDGE_LABELS = {"all": "Arêtes : toutes", "sharp": "Arêtes : vives", "none": "Arêtes : aucune"}
 
@@ -68,7 +71,58 @@ def srgb(r: float, g: float, b: float) -> Quantity_Color:
 # ---------------------------------------------------------------------------
 # Lecture STEP (XCAF : couleurs, noms, assemblages)
 # ---------------------------------------------------------------------------
-def read_step(path: str) -> tuple[TDocStd_Document, list]:
+def label_name(label) -> str:
+    attr = TDataStd_Name()
+    return attr.Get().ToExtString().strip() if label.FindAttribute(TDataStd_Name.GetID_s(), attr) else ""
+
+
+def node_name(node) -> str:
+    """Nom de l'occurrence, sinon du prototype (le lecteur STEP nomme les instances « =>[0:1:1:2] »)."""
+    name = label_name(node.Label)
+    if not name or name.startswith("=>"):
+        name = label_name(node.RefLabel)
+    return name or "Sans nom"
+
+
+class TreeNode:
+    """Nœud de l'arborescence d'assemblage : une occurrence XCAF (feuille = objet AIS affichable)."""
+
+    def __init__(self, name: str, is_assembly: bool):
+        self.name = name
+        self.is_assembly = is_assembly
+        self.children: list[TreeNode] = []
+        self.ais: XCAFPrs_AISObject | None = None
+
+
+def explore(doc: TDocStd_Document) -> TreeNode:
+    """Parcourt le document XCAF (occurrences avec localisation cumulée) et crée un objet AIS par feuille."""
+    root = TreeNode("", True)
+    stack = [root]                       # stack[d] = parent des nœuds de profondeur d
+    explorer = XCAFPrs_DocumentExplorer(doc, XCAFPrs_DocumentExplorerFlags_None)
+    while explorer.More():
+        n = explorer.Current()
+        depth = explorer.CurrentDepth()
+        node = TreeNode(node_name(n), n.IsAssembly)
+        if not n.IsAssembly:
+            node.ais = XCAFPrs_AISObject(n.RefLabel)      # prototype (couleurs, sous-formes) …
+            node.ais.SetLocalTransformation(n.Location.Transformation())   # … placé par la localisation cumulée
+        del stack[depth + 1:]
+        stack[depth].children.append(node)
+        stack.append(node)
+        explorer.Next()
+    if not any(True for _ in iter_leaves(root)):
+        raise ValueError("aucune forme dans le fichier")
+    return root
+
+
+def iter_leaves(node: TreeNode):
+    if node.ais is not None:
+        yield node
+    for c in node.children:
+        yield from iter_leaves(c)
+
+
+def read_step(path: str) -> TDocStd_Document:
     doc = TDocStd_Document(TCollection_ExtendedString("MDTV-XCAF"))
     reader = STEPCAFControl_Reader()
     reader.SetColorMode(True)
@@ -78,13 +132,7 @@ def read_step(path: str) -> tuple[TDocStd_Document, list]:
         raise ValueError("fichier STEP illisible ou invalide")
     if not reader.Transfer(doc):
         raise ValueError("transfert STEP → XCAF échoué")
-    shape_tool = XCAFDoc_DocumentTool.ShapeTool_s(doc.Main())
-    labels = Sequence_TDF_Label()
-    shape_tool.GetFreeShapes(labels)
-    free = [labels.Value(i) for i in range(1, labels.Length() + 1)]
-    if not free:
-        raise ValueError("aucune forme dans le fichier")
-    return doc, free
+    return doc
 
 
 # ---------------------------------------------------------------------------
@@ -104,8 +152,13 @@ class OccView(QWidget):
         self._last = QPoint()
         self._mode = None            # 'rotate' | 'pan'
         self.doc = None              # conserve le document XCAF (les AIS y font référence)
+        self.tree: TreeNode | None = None
         self.objects: list[XCAFPrs_AISObject] = []
         self.edge_mode = "all"
+        self._redraw_timer = QTimer(self)
+        self._redraw_timer.setSingleShot(True)
+        self._redraw_timer.setInterval(0)
+        self._redraw_timer.timeout.connect(lambda: self.view.Redraw())
 
     def paintEngine(self):
         return None
@@ -226,16 +279,24 @@ class OccView(QWidget):
 
     def load(self, path: str) -> dict:
         t0 = time.perf_counter()
-        doc, labels = read_step(path)
+        doc = read_step(path)
+        root = explore(doc)
         self.ctx.RemoveAll(False)
         self.objects.clear()
         self.doc = doc
-        for lab in labels:
-            obj = XCAFPrs_AISObject(lab)
-            self.ctx.Display(obj, AIS_Shaded, -1, False)
-            self.objects.append(obj)
+        self.tree = root
+        for leaf in iter_leaves(root):
+            self.ctx.Display(leaf.ais, AIS_Shaded, -1, False)
+            self.objects.append(leaf.ais)
         self.set_view("iso")
-        return {"bodies": len(labels), "seconds": time.perf_counter() - t0}
+        return {"bodies": len(self.objects), "seconds": time.perf_counter() - t0}
+
+    def set_visible(self, ais: XCAFPrs_AISObject, visible: bool):
+        if visible:
+            self.ctx.Display(ais, AIS_Shaded, -1, False)
+        else:
+            self.ctx.Erase(ais, False)
+        self._redraw_timer.start()          # regroupe les rafraîchissements (cascade de cases à cocher)
 
     def dump(self, out: str) -> bool:
         return self.view.Dump(out)
@@ -283,10 +344,34 @@ class MainWindow(QMainWindow):
         act("Ouvrir…", self.open_dialog, "Ctrl+O")
         act("Ajuster", self.occ.fit_all, "F")
         tb.addSeparator()
-        for key, label, name in (("0", "Iso", "iso"), ("1", "Face", "front"), ("2", "Arrière", "back"),
-                                 ("3", "Dessus", "top"), ("4", "Dessous", "bottom"),
-                                 ("5", "Gauche", "left"), ("6", "Droite", "right")):
-            act(label, lambda _=False, n=name: self.occ.set_view(n), key, f"{label} ({key})")
+        view_menu = QMenu("Vue", self)
+        for key, label, name in VIEW_LABELS:
+            a = QAction(label, self)
+            a.setShortcut(QKeySequence(key))
+            a.triggered.connect(lambda _=False, n=name: self.occ.set_view(n))
+            view_menu.addAction(a)
+            self.addAction(a)                    # raccourci actif même menu fermé
+        view_button = QToolButton(self)
+        view_button.setText("Vue")
+        view_button.setMenu(view_menu)
+        view_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        view_button.setToolTip("Vues standard (0-6)")
+        tb.addWidget(view_button)
+
+        self.tree = QTreeWidget(self)
+        self.tree.setHeaderHidden(True)
+        self.tree.itemChanged.connect(self._tree_item_changed)
+        self.dock = QDockWidget("Arborescence", self)
+        self.dock.setWidget(self.tree)
+        self.dock.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetClosable | QDockWidget.DockWidgetFeature.DockWidgetMovable)
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.dock)
+        self.dock.hide()
+        tree_action = self.dock.toggleViewAction()
+        tree_action.setText("Arborescence")
+        tree_action.setShortcut(QKeySequence("T"))
+        tree_action.setToolTip("Afficher / masquer l'arborescence (T)")
+        tb.addAction(tree_action)
+        self.addAction(tree_action)
         tb.addSeparator()
         self.edge_action = act(EDGE_LABELS["all"], self.cycle_edges, "E", "Arêtes : toutes → vives → aucune (E)")
         self.proj_action = act("Perspective", self.toggle_projection, "P", "Perspective / orthographique (P)")
@@ -324,8 +409,42 @@ class MainWindow(QMainWindow):
         finally:
             QApplication.restoreOverrideCursor()
         self.hint.hide()
+        self._fill_tree(self.occ.tree)
         self.setWindowTitle(f"{Path(path).name} — STEP Viewer")
-        self.statusBar().showMessage(f"{path} — {info['bodies']} corps, {info['seconds']:.1f} s".replace(".", ","))
+        seconds = f"{info['seconds']:.1f}".replace(".", ",")
+        self.statusBar().showMessage(f"{path} — {info['bodies']} corps, {seconds} s")
+
+    # --- arborescence --------------------------------------------------------------
+    def _fill_tree(self, root: TreeNode):
+        self.tree.blockSignals(True)
+        self.tree.clear()
+
+        def add(parent, node: TreeNode):
+            item = QTreeWidgetItem(parent, [node.name])
+            flags = item.flags() | Qt.ItemFlag.ItemIsUserCheckable
+            if node.children:
+                flags |= Qt.ItemFlag.ItemIsAutoTristate      # coche/décoche en cascade, état partiel automatique
+                font = item.font(0)
+                font.setBold(True)
+                item.setFont(0, font)
+            item.setFlags(flags)
+            item.setCheckState(0, Qt.CheckState.Checked)
+            item.setData(0, Qt.ItemDataRole.UserRole, node)
+            for c in node.children:
+                add(item, c)
+            return item
+
+        # la racine synthétique n'est pas affichée ; ses enfants sont les formes libres
+        for c in root.children:
+            add(self.tree, c)
+        self.tree.expandAll()
+        self.tree.blockSignals(False)
+        self.dock.show()
+
+    def _tree_item_changed(self, item: QTreeWidgetItem, column: int):
+        node: TreeNode = item.data(0, Qt.ItemDataRole.UserRole)
+        if node is not None and node.ais is not None:
+            self.occ.set_visible(node.ais, item.checkState(0) == Qt.CheckState.Checked)
 
     def cycle_edges(self):
         mode = EDGE_MODES[(EDGE_MODES.index(self.occ.edge_mode) + 1) % len(EDGE_MODES)]

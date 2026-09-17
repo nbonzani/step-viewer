@@ -17,7 +17,7 @@
   #toolbar {
     position: absolute; top: 10px; left: 10px; display: flex; gap: 6px; flex-wrap: wrap;
     background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 6px;
-    backdrop-filter: blur(6px); user-select: none;
+    backdrop-filter: blur(6px); user-select: none; z-index: 10;  /* le backdrop-filter crée un contexte d'empilement : passer au-dessus du panneau */
   }
   #toolbar .sep { width: 1px; background: var(--border); margin: 2px 2px; }
   button {
@@ -27,6 +27,37 @@
   button:hover { border-color: var(--accent); }
   button.on { background: var(--accent); color: #fff; border-color: var(--accent); }
   button kbd { font: 10px/1 monospace; opacity: 0.55; margin-left: 4px; }
+
+  .dd { position: relative; }
+  .dd > button::after { content: " ▾"; opacity: 0.6; }
+  .dd .menu {
+    display: none; position: absolute; top: calc(100% + 4px); left: 0; min-width: 150px; z-index: 5;
+    background: #fff; border: 1px solid var(--border); border-radius: 6px; padding: 4px; box-shadow: 0 4px 14px rgba(0,0,0,0.15);
+  }
+  .dd.open .menu { display: block; }
+  .dd .menu button { display: flex; justify-content: space-between; width: 100%; border: none; text-align: left; padding: 5px 8px; }
+  .dd .menu button:hover { background: rgba(31,111,235,0.12); }
+
+  #tree {
+    position: absolute; top: 56px; left: 10px; bottom: 44px; width: 270px; display: none; flex-direction: column;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px; backdrop-filter: blur(6px);
+    user-select: none; overflow: hidden;
+  }
+  #tree.show { display: flex; }
+  #tree header { padding: 6px 10px; font-weight: 600; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
+  #tree header button { padding: 1px 7px; }
+  #tree .body { overflow: auto; padding: 4px 6px; flex: 1; }
+  #tree ul { list-style: none; margin: 0; padding-left: 16px; }
+  #tree .body > ul { padding-left: 0; }
+  #tree .row { display: flex; align-items: center; gap: 4px; padding: 2px 2px; border-radius: 4px; white-space: nowrap; }
+  #tree .row:hover { background: rgba(31,111,235,0.10); }
+  #tree .exp { width: 14px; text-align: center; cursor: pointer; opacity: 0.7; font-size: 10px; flex: none; }
+  #tree .exp.leaf { visibility: hidden; }
+  #tree li.collapsed > ul { display: none; }
+  #tree input[type=checkbox] { margin: 0; flex: none; }
+  #tree .name { overflow: hidden; text-overflow: ellipsis; cursor: default; }
+  #tree .name.asm { font-weight: 600; }
+  #tree .cnt { opacity: 0.5; font-size: 11px; margin-left: 2px; }
 
   #status {
     position: absolute; left: 10px; bottom: 10px; padding: 5px 10px; border-radius: 6px;
@@ -72,13 +103,19 @@
   <button id="b-open" title="Ouvrir un fichier STEP (Ctrl+O)">Ouvrir…</button>
   <button id="b-fit" title="Ajuster la vue au modèle (F)">Ajuster<kbd>F</kbd></button>
   <span class="sep"></span>
-  <button data-view="iso" title="Vue isométrique (0)">Iso<kbd>0</kbd></button>
-  <button data-view="front" title="Face (1)">Face<kbd>1</kbd></button>
-  <button data-view="back" title="Arrière (2)">Arrière<kbd>2</kbd></button>
-  <button data-view="top" title="Dessus (3)">Dessus<kbd>3</kbd></button>
-  <button data-view="bottom" title="Dessous (4)">Dessous<kbd>4</kbd></button>
-  <button data-view="left" title="Gauche (5)">Gauche<kbd>5</kbd></button>
-  <button data-view="right" title="Droite (6)">Droite<kbd>6</kbd></button>
+  <div class="dd" id="dd-view">
+    <button title="Vues standard">Vue</button>
+    <div class="menu">
+      <button data-view="iso">Isométrique<kbd>0</kbd></button>
+      <button data-view="front">Face<kbd>1</kbd></button>
+      <button data-view="back">Arrière<kbd>2</kbd></button>
+      <button data-view="top">Dessus<kbd>3</kbd></button>
+      <button data-view="bottom">Dessous<kbd>4</kbd></button>
+      <button data-view="left">Gauche<kbd>5</kbd></button>
+      <button data-view="right">Droite<kbd>6</kbd></button>
+    </div>
+  </div>
+  <button id="b-tree" title="Afficher / masquer l'arborescence (T)">Arborescence<kbd>T</kbd></button>
   <span class="sep"></span>
   <button id="b-edges" title="Arêtes : toutes → vives → aucune (E)">Arêtes : toutes<kbd>E</kbd></button>
   <button id="b-proj" title="Perspective / orthographique (P)">Perspective<kbd>P</kbd></button>
@@ -90,6 +127,10 @@
     <small>.step / .stp — rotation : clic gauche · panoramique : clic droit ou molette enfoncée · zoom : molette</small>
     <button id="b-open2">Ouvrir un fichier…</button>
   </div>
+</div>
+<div id="tree">
+  <header><span>Arborescence</span><button id="b-tree-close" title="Masquer">×</button></header>
+  <div class="body"></div>
 </div>
 <div id="loading"><div class="spinner"></div><span id="loading-text">Lecture du fichier…</span></div>
 <div id="error"></div>
@@ -280,6 +321,8 @@ axesCam.up.copy(UP);
 }
 
 let model = null;           // THREE.Group du modèle courant
+let lastData = null;        // dernier résultat d'import (hiérarchie + maillages)
+window.stepViewer = { get data() { return lastData; }, loadFile: f => loadFile(f) };
 let bounds = { center: new THREE.Vector3(), radius: 50 };
 let edgeMode = 'all';       // 'all' | 'sharp' | 'none'
 let renderQueued = false;
@@ -333,17 +376,14 @@ window.addEventListener('resize', resize);
 // Construction du modèle
 // ---------------------------------------------------------------------------
 const DEFAULT_COLOR = [0.72, 0.74, 0.76];
-const tmpColor = new THREE.Color();
-function toLinear(rgb) {
-  tmpColor.setRGB(rgb[0], rgb[1], rgb[2], THREE.SRGBColorSpace); // le STEP porte des valeurs sRGB
-  return [tmpColor.r, tmpColor.g, tmpColor.b];
-}
+// occt-import-js renvoie les couleurs Quantity_Color d'OCCT, déjà en RGB linéaire (le sRGB du STEP est converti à la lecture)
+const toLinear = rgb => rgb;
 
 function buildModel(meshes) {
   const group = new THREE.Group();
   const box = new THREE.Box3();
   let triangles = 0;
-  for (const m of meshes) {
+  meshes.forEach((m, mi) => {
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.BufferAttribute(m.position, 3));
     g.setIndex(new THREE.BufferAttribute(m.index, 1));
@@ -371,6 +411,7 @@ function buildModel(meshes) {
     });
     const mesh = new THREE.Mesh(g, mat);
     mesh.name = m.name;
+    mesh.userData.meshIndex = mi;
     group.add(mesh);
     g.computeBoundingBox();
     box.union(g.boundingBox);
@@ -383,10 +424,11 @@ function buildModel(meshes) {
       eg.setAttribute('position', new THREE.BufferAttribute(arr, 3));
       const lines = new THREE.LineSegments(eg, lineMat);
       lines.userData.edgeKind = key;
+      lines.userData.meshIndex = mi;
       lines.renderOrder = 1;
       group.add(lines);
     }
-  }
+  });
   const sphere = new THREE.Sphere();
   box.getBoundingSphere(sphere);
   return { group, center: sphere.center, radius: Math.max(sphere.radius, 1e-3), triangles };
@@ -399,12 +441,121 @@ function disposeModel() {
   model = null;
 }
 
+let hiddenMeshes = new Set();   // indices de maillages masqués via l'arborescence
+
+function applyVisibility() {
+  if (!model) return;
+  model.traverse(o => {
+    if (o.userData.meshIndex === undefined) return;
+    const byTree = !hiddenMeshes.has(o.userData.meshIndex);
+    const byEdges = o.userData.edgeKind ? o.userData.edgeKind === edgeMode : true;
+    o.visible = byTree && byEdges;
+  });
+  requestRender();
+}
+
 function applyEdgeMode() {
-  if (model) model.traverse(o => { if (o.userData.edgeKind) o.visible = o.userData.edgeKind === edgeMode; });
+  applyVisibility();
   document.getElementById('b-edges').textContent = { all: 'Arêtes : toutes', sharp: 'Arêtes : vives', none: 'Arêtes : aucune' }[edgeMode];
   document.getElementById('b-edges').insertAdjacentHTML('beforeend', '<kbd>E</kbd>');
   requestRender();
 }
+
+// ---------------------------------------------------------------------------
+// Arborescence d'assemblage (hiérarchie fournie par occt-import-js)
+// ---------------------------------------------------------------------------
+const treeEl = document.getElementById('tree');
+const treeBody = treeEl.querySelector('.body');
+const GENERIC_NAMES = new Set(['', 'SOLID', 'COMPOUND', 'SHELL', 'FACE']);
+let treeRoot = null;
+
+// Normalise la hiérarchie d'occt-import-js :
+//  - une pièce = nœud dont l'unique enfant est une feuille au nom générique (SOLID…) → fusion ;
+//  - un nœud portant plusieurs maillages (sous-ensemble instancié, aplati par l'importateur) → une ligne fille par maillage.
+function simplifyNode(n, meshes) {
+  const node = { name: (n.name || '').trim(), meshes: [...(n.meshes || [])], children: (n.children || []).map(c => simplifyNode(c, meshes)) };
+  if (node.children.length === 1 && node.children[0].children.length === 0 && GENERIC_NAMES.has(node.children[0].name.toUpperCase())) {
+    node.meshes.push(...node.children[0].meshes);
+    node.children = [];
+  }
+  if (node.meshes.length > 1 || (node.meshes.length && node.children.length)) {
+    node.children.push(...node.meshes.map(i => ({ name: (meshes[i].name || '').trim(), meshes: [i], children: [] })));
+    node.meshes = [];
+  }
+  if (!node.name) node.name = node.meshes.map(i => meshes[i].name).find(Boolean) || '';
+  return node;
+}
+
+function buildTree(root, meshes) {
+  treeBody.innerHTML = '';
+  hiddenMeshes = new Set();
+  treeRoot = null;
+  if (!root) { treeEl.classList.remove('show'); return; }
+  let r = simplifyNode(root, meshes);
+  // racine synthétique de l'importateur (sans nom ni maillage) : on descend d'un niveau
+  while (r.children.length === 1 && r.meshes.length === 0 && !r.name) r = r.children[0];
+  treeRoot = r;
+  treeBody.appendChild(renderNode(r, null));
+  treeEl.classList.add('show');
+}
+
+function renderNode(node, parent) {
+  node.parent = parent;
+  const li = document.createElement('li');
+  const row = document.createElement('div');
+  row.className = 'row';
+  const exp = document.createElement('span');
+  exp.className = 'exp' + (node.children.length ? '' : ' leaf');
+  exp.textContent = '▼';
+  exp.onclick = () => { li.classList.toggle('collapsed'); exp.textContent = li.classList.contains('collapsed') ? '▶' : '▼'; };
+  const cb = document.createElement('input');
+  cb.type = 'checkbox'; cb.checked = true;
+  cb.onchange = () => { setSubtree(node, cb.checked); updateAncestors(node); recomputeHidden(); };
+  const name = document.createElement('span');
+  name.className = 'name' + (node.children.length ? ' asm' : '');
+  name.textContent = node.name || 'Sans nom';
+  name.title = name.textContent;
+  name.onclick = () => { cb.checked = !cb.checked; cb.onchange(); };
+  row.append(exp, cb, name);
+  if (node.children.length) {
+    const cnt = document.createElement('span');
+    cnt.className = 'cnt'; cnt.textContent = `(${node.children.length})`;
+    row.append(cnt);
+  }
+  li.append(row);
+  node.cb = cb;
+  if (node.children.length) {
+    const ul = document.createElement('ul');
+    for (const c of node.children) ul.appendChild(renderNode(c, node));
+    li.append(ul);
+  }
+  if (parent) return li;
+  const rootUl = document.createElement('ul');
+  rootUl.appendChild(li);
+  return rootUl;
+}
+
+function setSubtree(node, checked) {
+  node.cb.checked = checked; node.cb.indeterminate = false;
+  for (const c of node.children) setSubtree(c, checked);
+}
+function updateAncestors(node) {
+  for (let p = node.parent; p; p = p.parent) {
+    const states = p.children.map(c => c.cb.indeterminate ? null : c.cb.checked);
+    const all = states.every(s => s === true), none = states.every(s => s === false);
+    p.cb.checked = !none; p.cb.indeterminate = !all && !none;
+  }
+}
+function recomputeHidden() {
+  hiddenMeshes = new Set();
+  (function walk(n, vis) {
+    vis = vis && n.cb.checked;
+    if (!vis) for (const i of n.meshes) hiddenMeshes.add(i);
+    for (const c of n.children) walk(c, vis);
+  })(treeRoot, true);
+  applyVisibility();
+}
+function toggleTree() { if (treeRoot) treeEl.classList.toggle('show'); }
 
 // ---------------------------------------------------------------------------
 // Caméra : ajustement, vues standard, projection
@@ -486,11 +637,13 @@ async function loadFile(file) {
     const t0 = performance.now();
     const buffer = await file.arrayBuffer();
     const data = await parseStep(buffer);
+    lastData = data;                          // exposé via window.stepViewer (tests, automatisation)
     disposeModel();
     const built = buildModel(data.meshes);
     model = built.group;
     bounds = { center: built.center, radius: built.radius };
     scene.add(model);
+    buildTree(data.root, data.meshes);
     applyEdgeMode();
     dropEl.classList.add('hidden');
     setView('iso');
@@ -524,7 +677,12 @@ document.getElementById('b-open2').onclick = () => fileInput.click();
 document.getElementById('b-fit').onclick = () => fitAll();
 document.getElementById('b-edges').onclick = () => { edgeMode = { all: 'sharp', sharp: 'none', none: 'all' }[edgeMode]; applyEdgeMode(); };
 document.getElementById('b-proj').onclick = toggleProjection;
-for (const b of document.querySelectorAll('[data-view]')) b.onclick = () => setView(b.dataset.view);
+const ddView = document.getElementById('dd-view');
+ddView.querySelector(':scope > button').onclick = e => { e.stopPropagation(); ddView.classList.toggle('open'); };
+for (const b of document.querySelectorAll('[data-view]')) b.onclick = () => { ddView.classList.remove('open'); setView(b.dataset.view); };
+window.addEventListener('pointerdown', e => { if (!ddView.contains(e.target)) ddView.classList.remove('open'); });
+document.getElementById('b-tree').onclick = toggleTree;
+document.getElementById('b-tree-close').onclick = toggleTree;
 canvas.addEventListener('dblclick', () => fitAll());
 
 window.addEventListener('keydown', e => {
@@ -535,6 +693,7 @@ window.addEventListener('keydown', e => {
   else if (e.key === 'f' || e.key === 'F') fitAll();
   else if (e.key === 'e' || e.key === 'E') document.getElementById('b-edges').click();
   else if (e.key === 'p' || e.key === 'P') toggleProjection();
+  else if (e.key === 't' || e.key === 'T') toggleTree();
 });
 
 resize();

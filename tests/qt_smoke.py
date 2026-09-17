@@ -16,6 +16,7 @@ import step_viewer_qt as sv
 
 OUT = Path(sys.argv[1] if len(sys.argv) > 1 else ".")
 SAMPLE = str(Path(__file__).with_name("sample.step"))
+ASSEMBLY = str(Path(__file__).with_name("assembly.step"))
 
 
 def main():
@@ -88,6 +89,35 @@ def main():
     win.load(SAMPLE)
     assert len(v.objects) == 2
     shot("10_reload")
+
+    # 7. assemblage : arborescence et masquage en cascade
+    win.load(ASSEMBLY)
+    assert len(v.objects) == 3
+    assert win.dock.isVisible()
+    def rows(item=None):
+        items = [win.tree.topLevelItem(i) for i in range(win.tree.topLevelItemCount())] if item is None             else [item.child(i) for i in range(item.childCount())]
+        return [(it.text(0), it.checkState(0).name, rows(it)) for it in items]
+    tree = rows()
+    assert tree == [("Ensemble", "Checked", [
+        ("Sous-ensemble", "Checked", [("Plaque", "Checked", []), ("Axe", "Checked", [])]),
+        ("Axe", "Checked", [])])], tree
+    ensemble = win.tree.topLevelItem(0)
+    sous = ensemble.child(0)
+    sous.setCheckState(0, Qt.CheckState.Unchecked)          # cascade sur Plaque et Axe
+    app.processEvents()
+    assert rows() == [("Ensemble", "PartiallyChecked", [
+        ("Sous-ensemble", "Unchecked", [("Plaque", "Unchecked", []), ("Axe", "Unchecked", [])]),
+        ("Axe", "Checked", [])])], rows()
+    assert v.ctx.IsDisplayed(sous.child(0).data(0, Qt.ItemDataRole.UserRole).ais) is False
+    assert v.ctx.IsDisplayed(ensemble.child(1).data(0, Qt.ItemDataRole.UserRole).ais) is True
+    shot("11_hide_subassembly")
+    sous.child(0).setCheckState(0, Qt.CheckState.Checked)    # Plaque seule → parent partiel
+    app.processEvents()
+    assert sous.checkState(0) == Qt.CheckState.PartiallyChecked
+    assert v.ctx.IsDisplayed(sous.child(0).data(0, Qt.ItemDataRole.UserRole).ais) is True
+    shot("12_show_plate")
+    QTest.keyClick(win, Qt.Key.Key_T)                        # masque le dock
+    assert not win.dock.isVisible()
 
     print("OK :", ", ".join(steps))
     QTimer.singleShot(0, app.quit)
