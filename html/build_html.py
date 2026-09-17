@@ -13,12 +13,16 @@ VENDOR = ROOT / "vendor"
 SRC = ROOT / "html" / "src" / "viewer.html"
 OUT = ROOT / "html" / "dist" / "STEP_Viewer.html"
 
+# occt-import-js : build patché (wasm/out, produit par .github/workflows/build-wasm.yml) si présent,
+# sinon la version amont téléchargée par vendor/fetch_vendor.py (hiérarchie et couleurs de faces limitées)
+PATCHED = ROOT / "wasm" / "out"
+OCCT_DIR = PATCHED if (PATCHED / "occt-import-js.wasm").exists() else VENDOR
 ASSETS = {
     "THREE": VENDOR / "three.esm.js",
     "ORBIT": VENDOR / "OrbitControls.js",
-    "OCCT": VENDOR / "occt-import-js.js",
+    "OCCT": OCCT_DIR / "occt-import-js.js",
 }
-WASM = VENDOR / "occt-import-js.wasm"
+WASM = OCCT_DIR / "occt-import-js.wasm"
 SELFTEST_STEP = ROOT / "tests" / "box.step"
 
 
@@ -34,6 +38,7 @@ def main():
     html = html.replace("{{SELFTEST_B64}}", base64.b64encode(gzip.compress(SELFTEST_STEP.read_bytes(), 9)).decode("ascii"))
     OUT.parent.mkdir(parents=True, exist_ok=True)
     OUT.write_text(html, encoding="utf-8")
+    print(f"occt-import-js : {OCCT_DIR.relative_to(ROOT)}")
     print(f"Écrit : {OUT} ({OUT.stat().st_size / 1e6:.1f} Mo)")
 
 
