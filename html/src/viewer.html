@@ -58,6 +58,18 @@
   #tree .name { overflow: hidden; text-overflow: ellipsis; cursor: default; }
   #tree .name.asm { font-weight: 600; }
   #tree .cnt { opacity: 0.5; font-size: 11px; margin-left: 2px; }
+  #tree .row.sel { background: rgba(255,140,26,0.28); }
+  #tree .row.sel:hover { background: rgba(255,140,26,0.38); }
+
+  #ctxmenu {
+    position: absolute; display: none; z-index: 20; min-width: 160px; background: #fff; border: 1px solid var(--border);
+    border-radius: 6px; padding: 4px; box-shadow: 0 4px 14px rgba(0,0,0,0.18); user-select: none;
+  }
+  #ctxmenu.show { display: block; }
+  #ctxmenu button { display: flex; justify-content: space-between; width: 100%; border: none; text-align: left; padding: 5px 8px; background: none; }
+  #ctxmenu button:hover:not(:disabled) { background: rgba(31,111,235,0.12); }
+  #ctxmenu button:disabled { opacity: 0.45; cursor: default; }
+  #ctxmenu hr { border: none; border-top: 1px solid var(--border); margin: 4px 0; }
 
   #status {
     position: absolute; left: 10px; bottom: 10px; padding: 5px 10px; border-radius: 6px;
@@ -116,6 +128,8 @@
     </div>
   </div>
   <button id="b-tree" title="Afficher / masquer l'arborescence (T)">Arborescence<kbd>T</kbd></button>
+  <button id="b-hide" title="Cacher la sélection (H)">Cacher<kbd>H</kbd></button>
+  <button id="b-showall" title="Afficher toutes les pièces (Ctrl+H)">Tout afficher</button>
   <span class="sep"></span>
   <button id="b-edges" title="Arêtes : toutes → vives → aucune (E)">Arêtes : toutes<kbd>E</kbd></button>
   <button id="b-proj" title="Perspective / orthographique (P)">Perspective<kbd>P</kbd></button>
@@ -124,7 +138,8 @@
 <div id="drop">
   <div class="box">
     Glissez un fichier STEP ici
-    <small>.step / .stp — rotation : clic gauche · panoramique : clic droit ou molette enfoncée · zoom : molette</small>
+    <small>.step / .stp — rotation : clic gauche · panoramique : clic droit ou molette enfoncée · zoom : molette<br>
+      clic : sélection (Ctrl / Maj : multiple) · clic droit : menu Cacher / Afficher</small>
     <button id="b-open2">Ouvrir un fichier…</button>
   </div>
 </div>
@@ -132,6 +147,7 @@
   <header><span>Arborescence</span><button id="b-tree-close" title="Masquer">×</button></header>
   <div class="body"></div>
 </div>
+<div id="ctxmenu"></div>
 <div id="loading"><div class="spinner"></div><span id="loading-text">Lecture du fichier…</span></div>
 <div id="error"></div>
 <div id="status"></div>
@@ -322,7 +338,8 @@ axesCam.up.copy(UP);
 
 let model = null;           // THREE.Group du modèle courant
 let lastData = null;        // dernier résultat d'import (hiérarchie + maillages)
-window.stepViewer = { get data() { return lastData; }, loadFile: f => loadFile(f) };
+window.stepViewer = { get data() { return lastData; }, loadFile: f => loadFile(f),
+  get selection() { return [...selectedNodes].map(n => n.name); }, get hidden() { return [...hiddenMeshes]; } };
 let bounds = { center: new THREE.Vector3(), radius: 50 };
 let edgeMode = 'all';       // 'all' | 'sharp' | 'none'
 let renderQueued = false;
@@ -412,6 +429,7 @@ function buildModel(meshes) {
     const mesh = new THREE.Mesh(g, mat);
     mesh.name = m.name;
     mesh.userData.meshIndex = mi;
+    mesh.userData.baseMaterial = mat;
     group.add(mesh);
     g.computeBoundingBox();
     box.union(g.boundingBox);
@@ -442,6 +460,10 @@ function disposeModel() {
 }
 
 let hiddenMeshes = new Set();   // indices de maillages masqués via l'arborescence
+const SELECTED_MATERIAL = new THREE.MeshPhongMaterial({
+  color: 0xff8c1a, side: THREE.DoubleSide, shininess: 35, specular: 0x333333,
+  polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1,
+});
 
 function applyVisibility() {
   if (!model) return;
@@ -468,6 +490,9 @@ const treeEl = document.getElementById('tree');
 const treeBody = treeEl.querySelector('.body');
 const GENERIC_NAMES = new Set(['', 'SOLID', 'COMPOUND', 'SHELL', 'FACE']);
 let treeRoot = null;
+let meshNode = [];              // index de maillage → nœud feuille
+const selectedNodes = new Set();
+let selectionAnchor = null;     // pour la sélection par plage (Maj)
 
 // Normalise la hiérarchie d'occt-import-js :
 //  - une pièce = nœud dont l'unique enfant est une feuille au nom générique (SOLID…) → fusion ;
@@ -495,8 +520,13 @@ function buildTree(root, meshes) {
   // racine synthétique de l'importateur (sans nom ni maillage) : on descend d'un niveau
   while (r.children.length === 1 && r.meshes.length === 0 && !r.name) r = r.children[0];
   treeRoot = r;
+  meshNode = [];
+  selectedNodes.clear();
+  selectionAnchor = null;
+  (function index(n) { for (const i of n.meshes) meshNode[i] = n; n.children.forEach(index); })(r);
   treeBody.appendChild(renderNode(r, null));
   treeEl.classList.add('show');
+  applySelection();
 }
 
 function renderNode(node, parent) {
@@ -510,12 +540,15 @@ function renderNode(node, parent) {
   exp.onclick = () => { li.classList.toggle('collapsed'); exp.textContent = li.classList.contains('collapsed') ? '▶' : '▼'; };
   const cb = document.createElement('input');
   cb.type = 'checkbox'; cb.checked = true;
-  cb.onchange = () => { setSubtree(node, cb.checked); updateAncestors(node); recomputeHidden(); };
+  // cocher une ligne appartenant à la sélection s'applique à toute la sélection
+  cb.onchange = () => { setVisibleNodes(selectedNodes.has(node) ? [...selectedNodes] : [node], cb.checked); };
   const name = document.createElement('span');
   name.className = 'name' + (node.children.length ? ' asm' : '');
   name.textContent = node.name || 'Sans nom';
   name.title = name.textContent;
-  name.onclick = () => { cb.checked = !cb.checked; cb.onchange(); };
+  row.onclick = e => { if (e.target === cb || e.target === exp) return; selectNode(node, e); };
+  row.oncontextmenu = e => { e.preventDefault(); if (!selectedNodes.has(node)) selectNode(node, {}); showContextMenu(e.clientX, e.clientY); };
+  node.row = row;
   row.append(exp, cb, name);
   if (node.children.length) {
     const cnt = document.createElement('span');
@@ -555,7 +588,89 @@ function recomputeHidden() {
   })(treeRoot, true);
   applyVisibility();
 }
+function setVisibleNodes(nodes, visible) {
+  for (const n of nodes) { setSubtree(n, visible); updateAncestors(n); }
+  recomputeHidden();
+}
 function toggleTree() { if (treeRoot) treeEl.classList.toggle('show'); }
+
+// --- sélection : clic = remplace, Ctrl = bascule, Maj = plage (ordre visuel des lignes) ---
+function visibleRows() { return [...treeBody.querySelectorAll('.row')].filter(r => r.offsetParent !== null); }
+function nodeOfRow(row) { return allNodes().find(n => n.row === row); }
+function allNodes() { const out = []; (function walk(n) { out.push(n); n.children.forEach(walk); })(treeRoot); return out; }
+function selectNode(node, e) {
+  if (e.shiftKey && selectionAnchor) {
+    const rows = visibleRows();
+    const a = rows.indexOf(selectionAnchor.row), b = rows.indexOf(node.row);
+    if (a >= 0 && b >= 0) {
+      if (!e.ctrlKey) selectedNodes.clear();
+      for (let i = Math.min(a, b); i <= Math.max(a, b); i++) selectedNodes.add(nodeOfRow(rows[i]));
+    }
+  } else if (e.ctrlKey || e.metaKey) {
+    if (selectedNodes.has(node)) selectedNodes.delete(node); else selectedNodes.add(node);
+    selectionAnchor = node;
+  } else {
+    selectedNodes.clear();
+    selectedNodes.add(node);
+    selectionAnchor = node;
+  }
+  applySelection();
+}
+function clearSelection() { selectedNodes.clear(); applySelection(); }
+function selectedMeshes() {
+  const set = new Set();
+  for (const n of selectedNodes) (function walk(m) { for (const i of m.meshes) set.add(i); m.children.forEach(walk); })(n);
+  return set;
+}
+function applySelection() {
+  if (!treeRoot) return;
+  for (const n of allNodes()) n.row.classList.toggle('sel', selectedNodes.has(n));
+  const sel = selectedMeshes();
+  if (model) model.traverse(o => { if (o.isMesh && o.userData.baseMaterial) o.material = sel.has(o.userData.meshIndex) ? SELECTED_MATERIAL : o.userData.baseMaterial; });
+  const n = selectedNodes.size;
+  document.getElementById('b-hide').disabled = n === 0;
+  requestRender();
+}
+function hideSelection() { if (selectedNodes.size) setVisibleNodes([...selectedNodes], false); }
+function showSelection() { if (selectedNodes.size) setVisibleNodes([...selectedNodes], true); }
+function showAll() { if (treeRoot) setVisibleNodes([treeRoot], true); }
+
+// --- picking dans la vue 3D ---------------------------------------------------------------
+const raycaster = new THREE.Raycaster();
+function pick(clientX, clientY) {
+  if (!model) return null;
+  const r = canvas.getBoundingClientRect();
+  raycaster.setFromCamera(new THREE.Vector2(((clientX - r.left) / r.width) * 2 - 1, -((clientY - r.top) / r.height) * 2 + 1), camera);
+  const meshes = model.children.filter(o => o.isMesh && o.visible);
+  const hit = raycaster.intersectObjects(meshes, false)[0];
+  return hit ? meshNode[hit.object.userData.meshIndex] || null : null;
+}
+
+// --- menu contextuel ------------------------------------------------------------------------
+const ctxEl = document.getElementById('ctxmenu');
+function showContextMenu(x, y) {
+  const n = selectedNodes.size;
+  const suffix = n > 1 ? ` (${n})` : '';
+  ctxEl.innerHTML = '';
+  const item = (label, fn, enabled = true, kbd = '') => {
+    const b = document.createElement('button');
+    b.innerHTML = label + (kbd ? `<kbd>${kbd}</kbd>` : '');
+    b.disabled = !enabled;
+    b.onclick = () => { hideContextMenu(); fn(); };
+    ctxEl.appendChild(b);
+  };
+  item('Cacher' + suffix, hideSelection, n > 0, 'H');
+  item('Afficher' + suffix, showSelection, n > 0);
+  ctxEl.appendChild(document.createElement('hr'));
+  item('Tout afficher', showAll, true, 'Ctrl+H');
+  item('Ajuster', () => fitAll(), true, 'F');
+  ctxEl.classList.add('show');
+  const w = ctxEl.offsetWidth, h = ctxEl.offsetHeight;
+  ctxEl.style.left = Math.min(x, window.innerWidth - w - 4) + 'px';
+  ctxEl.style.top = Math.min(y, window.innerHeight - h - 4) + 'px';
+}
+function hideContextMenu() { ctxEl.classList.remove('show'); }
+
 
 // ---------------------------------------------------------------------------
 // Caméra : ajustement, vues standard, projection
@@ -685,8 +800,30 @@ document.getElementById('b-tree').onclick = toggleTree;
 document.getElementById('b-tree-close').onclick = toggleTree;
 canvas.addEventListener('dblclick', () => fitAll());
 
+// clic (sans glissé) dans la vue : sélection ; clic droit : menu contextuel
+let pressPos = null, dragged = false;
+canvas.addEventListener('pointerdown', e => { pressPos = { x: e.clientX, y: e.clientY }; dragged = false; hideContextMenu(); });
+canvas.addEventListener('pointermove', e => { if (pressPos && Math.hypot(e.clientX - pressPos.x, e.clientY - pressPos.y) > 3) dragged = true; });
+canvas.addEventListener('pointerup', e => {
+  if (!pressPos || dragged) { pressPos = null; return; }
+  pressPos = null;
+  const node = pick(e.clientX, e.clientY);
+  if (e.button === 0) {
+    if (node) selectNode(node, e);
+    else if (!e.ctrlKey && !e.shiftKey) clearSelection();
+  } else if (e.button === 2) {
+    if (node && !selectedNodes.has(node)) selectNode(node, {});
+    showContextMenu(e.clientX, e.clientY);
+  }
+});
+window.addEventListener('pointerdown', e => { if (!ctxEl.contains(e.target)) hideContextMenu(); }, true);
+document.getElementById('b-hide').onclick = hideSelection;
+document.getElementById('b-showall').onclick = showAll;
+
 window.addEventListener('keydown', e => {
   if (e.ctrlKey && e.key.toLowerCase() === 'o') { e.preventDefault(); fileInput.click(); return; }
+  if (e.ctrlKey && e.key.toLowerCase() === 'h') { e.preventDefault(); showAll(); return; }
+  if (e.key === 'Escape') { hideContextMenu(); clearSelection(); return; }
   if (e.ctrlKey || e.altKey || e.metaKey) return;
   const map = { '0': 'iso', '1': 'front', '2': 'back', '3': 'top', '4': 'bottom', '5': 'left', '6': 'right' };
   if (map[e.key]) setView(map[e.key]);
@@ -694,6 +831,7 @@ window.addEventListener('keydown', e => {
   else if (e.key === 'e' || e.key === 'E') document.getElementById('b-edges').click();
   else if (e.key === 'p' || e.key === 'P') toggleProjection();
   else if (e.key === 't' || e.key === 'T') toggleTree();
+  else if (e.key === 'h' || e.key === 'H') hideSelection();
 });
 
 resize();

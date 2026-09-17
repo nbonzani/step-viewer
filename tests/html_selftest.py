@@ -55,6 +55,36 @@ def main():
         page.click("#dd-view [data-view=top]")
         assert page.evaluate("document.getElementById('dd-view').classList.contains('open')") is False
         print(f"assembly.step — arborescence OK ({hidden} maillages)")
+
+        # sélection multiple (clic, Ctrl, Maj), H / Ctrl+H, picking et menu contextuel dans la vue
+        page.keyboard.press("0")
+        page.wait_for_timeout(100)
+        sel = lambda: page.evaluate("window.stepViewer.selection")
+        hid = lambda: page.evaluate("window.stepViewer.hidden")
+        rows = page.locator("#tree .row .name")
+        rows.nth(2).click()
+        assert sel() == ["Plaque"], sel()
+        rows.nth(4).click(modifiers=["Control"])
+        assert sel() == ["Plaque", "Axe"], sel()
+        rows.nth(1).click()
+        rows.nth(3).click(modifiers=["Shift"])
+        assert sel() == ["Sous-ensemble", "Plaque", "Axe"], sel()
+        page.keyboard.press("h")
+        assert hid() == [0, 1], hid()
+        page.keyboard.press("Control+h")
+        assert hid() == [], hid()
+        page.keyboard.press("Escape")
+        page.mouse.click(600, 420)                             # la plaque, au centre en vue iso
+        assert sel() == ["Plaque"], sel()
+        page.mouse.click(600, 420, button="right")
+        labels = page.evaluate("[...document.querySelectorAll('#ctxmenu button')].map(b => b.firstChild.textContent)")
+        assert labels == ["Cacher", "Afficher", "Tout afficher", "Ajuster"], labels
+        page.click("#ctxmenu button >> nth=0")
+        page.wait_for_timeout(100)
+        assert hid() == [0], hid()
+        page.mouse.click(300, 600)                             # clic dans le vide : désélection
+        assert sel() == [], sel()
+        print("sélection / picking / menu contextuel OK")
         assert not errors, errors
         browser.close()
     print("OK")
