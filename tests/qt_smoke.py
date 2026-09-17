@@ -118,6 +118,48 @@ def main():
     shot("12_show_plate")
     QTest.keyClick(win, Qt.Key.Key_T)                        # masque le dock
     assert not win.dock.isVisible()
+    QTest.keyClick(win, Qt.Key.Key_T)
+
+    # 8. sélection : arborescence (multi) ↔ vue 3D, clic droit, H / Ctrl+H
+    win.show_all()
+    app.processEvents()
+    plaque, axe1, axe2 = sous.child(0), sous.child(1), ensemble.child(1)
+    leaf = lambda it: it.data(0, Qt.ItemDataRole.UserRole).ais
+    win.tree.clearSelection()
+    plaque.setSelected(True); axe2.setSelected(True)          # équivalent Ctrl+clic
+    app.processEvents()
+    assert [n.name for n in v.selected_leaves()] == ["Plaque", "Axe"] and v.ctx.IsSelected(leaf(axe1)) is False
+    win.hide_selection()                                     # H : cache Plaque + Axe(2)
+    app.processEvents()
+    assert plaque.checkState(0) == Qt.CheckState.Unchecked and axe2.checkState(0) == Qt.CheckState.Unchecked
+    assert axe1.checkState(0) == Qt.CheckState.Checked
+    assert v.ctx.IsDisplayed(leaf(plaque)) is False and v.ctx.IsDisplayed(leaf(axe1)) is True
+    shot("13_hide_selection")
+    win.show_all()
+    app.processEvents()
+    assert all(v.ctx.IsDisplayed(n.ais) for n in sv.iter_leaves(v.tree))
+    # sélection d'un sous-ensemble → toutes ses feuilles sélectionnées en 3D
+    win.tree.clearSelection(); sous.setSelected(True)
+    app.processEvents()
+    assert [n.name for n in v.selected_leaves()] == ["Plaque", "Axe"]
+    # clic gauche dans la vue sur l'axe de droite (au centre de l'image, vue iso) → sélection 3D → arborescence
+    QTest.keyClick(win, Qt.Key.Key_0)
+    app.processEvents()
+    QTest.mouseClick(v, Qt.MouseButton.LeftButton, pos=QPoint(v.width() // 2, v.height() // 2))
+    app.processEvents()
+    picked = [n.name for n in v.selected_leaves()]
+    assert len(picked) == 1, picked
+    assert [it.text(0) for it in win.tree.selectedItems()] == picked
+    # cocher une ligne d'une sélection multiple s'applique à toute la sélection
+    win.tree.clearSelection(); axe1.setSelected(True); axe2.setSelected(True)
+    axe1.setCheckState(0, Qt.CheckState.Unchecked)
+    app.processEvents()
+    assert axe2.checkState(0) == Qt.CheckState.Unchecked
+    shot("14_check_multi")
+    # menu contextuel de la vue : construit sans exec (modal)
+    menu = win._selection_menu(2)
+    assert [a.text() for a in menu.actions() if a.text()] == ["Cacher (2)", "Afficher (2)", "Tout afficher", "Ajuster"]
+    win.show_all()
 
     print("OK :", ", ".join(steps))
     QTimer.singleShot(0, app.quit)

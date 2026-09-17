@@ -6,7 +6,10 @@ Capture :    python step_viewer_qt.py fichier.step --dump sortie.png   (rendu ho
 Interaction : clic gauche = rotation, clic droit / molette enfoncée = panoramique, molette = zoom au curseur,
               double-clic = ajuster. Raccourcis : F ajuster, E arêtes (toutes/vives/aucune), P perspective/ortho,
               T arborescence, 0 iso, 1 face, 2 arrière, 3 dessus, 4 dessous, 5 gauche, 6 droite, Ctrl+O ouvrir.
-Arborescence : dock à gauche, une case à cocher par pièce / sous-ensemble (masquage en cascade).
+Arborescence : dock à gauche, une case à cocher par pièce / sous-ensemble (masquage en cascade), sélection
+              multiple (Ctrl / Maj) synchronisée avec la vue 3D, menu contextuel Cacher / Afficher / Tout afficher.
+Vue 3D : clic gauche = sélection (Ctrl : ajout), survol = surbrillance, clic droit = menu contextuel,
+         H = cacher la sélection, Ctrl+H = tout afficher.
 """
 from __future__ import annotations
 
@@ -16,14 +19,14 @@ import time
 import traceback
 from pathlib import Path
 
-from PyQt6.QtCore import QPoint, Qt, QTimer
+from PyQt6.QtCore import QPoint, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction, QKeySequence
 from PyQt6.QtWidgets import (
-    QApplication, QDockWidget, QFileDialog, QLabel, QMainWindow, QMenu, QMessageBox, QStackedLayout,
-    QToolBar, QToolButton, QTreeWidget, QTreeWidgetItem, QWidget,
+    QAbstractItemView, QApplication, QDockWidget, QFileDialog, QLabel, QMainWindow, QMenu, QMessageBox,
+    QStackedLayout, QToolBar, QToolButton, QTreeWidget, QTreeWidgetItem, QWidget,
 )
 
-from OCP.AIS import AIS_InteractiveContext, AIS_Shaded
+from OCP.AIS import AIS_InteractiveContext, AIS_SelectionScheme, AIS_Shaded
 from OCP.Aspect import Aspect_DisplayConnection, Aspect_GradientFillMethod, Aspect_TypeOfTriedronPosition
 from OCP.GeomAbs import GeomAbs_C0, GeomAbs_CN
 from OCP.Graphic3d import Graphic3d_Camera
@@ -139,6 +142,9 @@ def read_step(path: str) -> TDocStd_Document:
 # Widget de vue OpenCASCADE
 # ---------------------------------------------------------------------------
 class OccView(QWidget):
+    selectionChanged = pyqtSignal()          # sélection 3D modifiée par la souris
+    contextMenuRequested = pyqtSignal(QPoint)   # clic droit sans glissé (position widget)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_PaintOnScreen)
@@ -150,6 +156,8 @@ class OccView(QWidget):
         self.setMinimumSize(320, 240)
         self._ready = False
         self._last = QPoint()
+        self._press = QPoint()
+        self._dragged = False        # la souris a bougé depuis l'appui : pas un clic
         self._mode = None            # 'rotate' | 'pan'
         self.doc = None              # conserve le document XCAF (les AIS y font référence)
         self.tree: TreeNode | None = None
@@ -196,6 +204,12 @@ class OccView(QWidget):
         drawer.SetFaceBoundaryDraw(True)
         drawer.FaceBoundaryAspect().SetColor(srgb(0.10, 0.12, 0.15))
         drawer.FaceBoundaryAspect().SetWidth(1.0)
+        # surbrillance (survol) et sélection : ombrées, colorées, légèrement transparentes
+        for style, color, alpha in ((self.ctx.HighlightStyle(), srgb(0.30, 0.80, 1.00), 0.3),
+                                    (self.ctx.SelectionStyle(), srgb(1.00, 0.55, 0.10), 0.0)):
+            style.SetColor(color)
+            style.SetDisplayMode(AIS_Shaded)
+            style.SetTransparency(alpha)
         self.view.SetProj(VIEWS["iso"])
         self._ready = True
 
@@ -215,6 +229,8 @@ class OccView(QWidget):
 
     def mousePressEvent(self, e):
         self._last = e.position().toPoint()
+        self._press = self._last
+        self._dragged = False
         b = e.button()
         if b == Qt.MouseButton.LeftButton:
             self._mode = "rotate"
@@ -225,11 +241,32 @@ class OccView(QWidget):
 
     def mouseReleaseEvent(self, e):
         self._mode = None
-
-    def mouseMoveEvent(self, e):
-        if not self._mode:
+        if self._dragged:
             return
         p = e.position().toPoint()
+        if e.button() == Qt.MouseButton.LeftButton:
+            self.ctx.MoveTo(p.x(), p.y(), self.view, False)
+            ctrl = bool(e.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier))
+            self.ctx.SelectDetected(AIS_SelectionScheme.AIS_SelectionScheme_XOR if ctrl
+                                    else AIS_SelectionScheme.AIS_SelectionScheme_Replace)
+            self.view.Redraw()
+            self.selectionChanged.emit()
+        elif e.button() == Qt.MouseButton.RightButton:
+            self.ctx.MoveTo(p.x(), p.y(), self.view, False)
+            if self.ctx.HasDetected() and not self.ctx.IsSelected(self.ctx.DetectedInteractive()):
+                self.ctx.SelectDetected(AIS_SelectionScheme.AIS_SelectionScheme_Replace)   # la pièce sous le curseur
+                self.selectionChanged.emit()
+            self.view.Redraw()
+            self.contextMenuRequested.emit(p)
+
+    def mouseMoveEvent(self, e):
+        p = e.position().toPoint()
+        if not self._mode:
+            if self.objects:
+                self.ctx.MoveTo(p.x(), p.y(), self.view, True)     # surbrillance dynamique
+            return
+        if (p - self._press).manhattanLength() > 3:
+            self._dragged = True
         if self._mode == "rotate":
             self.view.Rotation(p.x(), p.y())
         else:
@@ -286,17 +323,30 @@ class OccView(QWidget):
         self.doc = doc
         self.tree = root
         for leaf in iter_leaves(root):
-            self.ctx.Display(leaf.ais, AIS_Shaded, -1, False)
+            self.ctx.Display(leaf.ais, AIS_Shaded, 0, False)      # mode 0 : sélection de l'objet entier
             self.objects.append(leaf.ais)
         self.set_view("iso")
         return {"bodies": len(self.objects), "seconds": time.perf_counter() - t0}
 
     def set_visible(self, ais: XCAFPrs_AISObject, visible: bool):
         if visible:
-            self.ctx.Display(ais, AIS_Shaded, -1, False)
+            self.ctx.Display(ais, AIS_Shaded, 0, False)
         else:
+            if self.ctx.IsSelected(ais):
+                self.ctx.AddOrRemoveSelected(ais, False)
             self.ctx.Erase(ais, False)
         self._redraw_timer.start()          # regroupe les rafraîchissements (cascade de cases à cocher)
+
+    def selected_leaves(self) -> list:
+        return [leaf for leaf in iter_leaves(self.tree) if self.ctx.IsSelected(leaf.ais)] if self.tree else []
+
+    def select_leaves(self, leaves: list):
+        """Remplace la sélection 3D (appelé depuis l'arborescence)."""
+        self.ctx.ClearSelected(False)
+        for leaf in leaves:
+            if self.ctx.IsDisplayed(leaf.ais):
+                self.ctx.AddOrRemoveSelected(leaf.ais, False)
+        self._redraw_timer.start()
 
     def dump(self, out: str) -> bool:
         return self.view.Dump(out)
@@ -360,7 +410,14 @@ class MainWindow(QMainWindow):
 
         self.tree = QTreeWidget(self)
         self.tree.setHeaderHidden(True)
+        self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)   # Ctrl / Maj
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._tree_context_menu)
         self.tree.itemChanged.connect(self._tree_item_changed)
+        self.tree.itemSelectionChanged.connect(self._tree_selection_changed)
+        self._syncing = False
+        self.occ.selectionChanged.connect(self._view_selection_changed)
+        self.occ.contextMenuRequested.connect(self._view_context_menu)
         self.dock = QDockWidget("Arborescence", self)
         self.dock.setWidget(self.tree)
         self.dock.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetClosable | QDockWidget.DockWidgetFeature.DockWidgetMovable)
@@ -372,6 +429,9 @@ class MainWindow(QMainWindow):
         tree_action.setToolTip("Afficher / masquer l'arborescence (T)")
         tb.addAction(tree_action)
         self.addAction(tree_action)
+        tb.addSeparator()
+        self.hide_action = act("Cacher", self.hide_selection, "H", "Cacher la sélection (H)")
+        self.show_all_action = act("Tout afficher", self.show_all, "Ctrl+H", "Afficher toutes les pièces (Ctrl+H)")
         tb.addSeparator()
         self.edge_action = act(EDGE_LABELS["all"], self.cycle_edges, "E", "Arêtes : toutes → vives → aucune (E)")
         self.proj_action = act("Perspective", self.toggle_projection, "P", "Perspective / orthographique (P)")
@@ -445,6 +505,84 @@ class MainWindow(QMainWindow):
         node: TreeNode = item.data(0, Qt.ItemDataRole.UserRole)
         if node is not None and node.ais is not None:
             self.occ.set_visible(node.ais, item.checkState(0) == Qt.CheckState.Checked)
+        # cocher une ligne appartenant à une sélection multiple s'applique à toute la sélection
+        if not self._syncing and item.isSelected():
+            self._set_checked([it for it in self.tree.selectedItems() if it is not item], item.checkState(0))
+
+    def _set_checked(self, items, state):
+        self._syncing = True
+        try:
+            for it in items:
+                if it.checkState(0) != state:
+                    it.setCheckState(0, state)
+        finally:
+            self._syncing = False
+
+    def _leaf_items(self):
+        stack = [self.tree.topLevelItem(i) for i in range(self.tree.topLevelItemCount())]
+        while stack:
+            item = stack.pop()
+            node = item.data(0, Qt.ItemDataRole.UserRole)
+            if node is not None and node.ais is not None:
+                yield item, node
+            stack.extend(item.child(i) for i in range(item.childCount()))
+
+    def _tree_selection_changed(self):
+        if self._syncing:
+            return
+        self._syncing = True
+        try:
+            selected = {id(item) for item in self.tree.selectedItems()}
+            # un sous-ensemble sélectionné sélectionne toutes ses feuilles
+            def covered(item):
+                while item is not None:
+                    if id(item) in selected:
+                        return True
+                    item = item.parent()
+                return False
+            self.occ.select_leaves([node for item, node in self._leaf_items() if covered(item)])
+        finally:
+            self._syncing = False
+
+    def _view_selection_changed(self):
+        self._syncing = True
+        try:
+            self.tree.clearSelection()          # y compris les sous-ensembles sélectionnés
+            for item, node in self._leaf_items():
+                if self.occ.ctx.IsSelected(node.ais):
+                    item.setSelected(True)
+        finally:
+            self._syncing = False
+
+    def hide_selection(self):
+        self._set_checked([it for it in self.tree.selectedItems()], Qt.CheckState.Unchecked)
+
+    def show_selection(self):
+        self._set_checked([it for it in self.tree.selectedItems()], Qt.CheckState.Checked)
+
+    def show_all(self):
+        self._set_checked([self.tree.topLevelItem(i) for i in range(self.tree.topLevelItemCount())], Qt.CheckState.Checked)
+
+    def _selection_menu(self, count: int) -> QMenu:
+        menu = QMenu(self)
+        suffix = f" ({count})" if count > 1 else ""
+        a = menu.addAction(f"Cacher{suffix}", self.hide_selection)
+        a.setEnabled(count > 0)
+        a = menu.addAction(f"Afficher{suffix}", self.show_selection)
+        a.setEnabled(count > 0)
+        menu.addSeparator()
+        menu.addAction("Tout afficher", self.show_all)
+        menu.addAction("Ajuster", self.occ.fit_all)
+        return menu
+
+    def _tree_context_menu(self, pos):
+        item = self.tree.itemAt(pos)
+        if item is not None and not item.isSelected():
+            self.tree.setCurrentItem(item)
+        self._selection_menu(len(self.tree.selectedItems())).exec(self.tree.viewport().mapToGlobal(pos))
+
+    def _view_context_menu(self, pos: QPoint):
+        self._selection_menu(len(self.tree.selectedItems())).exec(self.occ.mapToGlobal(pos))
 
     def cycle_edges(self):
         mode = EDGE_MODES[(EDGE_MODES.index(self.occ.edge_mode) + 1) % len(EDGE_MODES)]

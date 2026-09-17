@@ -1,0 +1,23 @@
+name: build-wasm
+# Compile occt-import-js (importateur XCAF patché) en WebAssembly et publie l'artefact.
+on:
+  workflow_dispatch:
+  push:
+    paths: ["wasm/**", ".github/workflows/build-wasm.yml"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 3.1.69
+      - run: sudo apt-get update -q && sudo apt-get install -y -q ninja-build
+      - run: bash wasm/build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: occt-import-js-patched
+          path: wasm/out/
+          if-no-files-found: error

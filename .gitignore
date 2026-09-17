@@ -8,3 +8,6 @@ vendor/*.tgz
 vendor/*.js
 vendor/*.wasm
 !vendor/fetch_vendor.py
+build/
+wasm/build/
+wasm/out/
